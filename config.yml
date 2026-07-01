@@ -1,0 +1,10 @@
+default:
+  project_name: "CKD Bone"
+  paths:
+    raw_data: "data/raw"
+    processed_data: "data/processed"
+    output: "output"
+    docs: "docs"
+  options:
+    seed: 123
+    timezone: "Europe/London"

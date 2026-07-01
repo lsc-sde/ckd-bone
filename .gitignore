@@ -1,0 +1,26 @@
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.Rprofile.user
+.Renviron
+.Renviron.site
+.Rapp.history
+
+# renv
+renv/library/
+renv/staging/
+renv/python/
+!renv/settings.json
+!renv/activate.R
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*.log
+
+# project outputs
+output/
+Results/
+data/raw/
+data/processed/
