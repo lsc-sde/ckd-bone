@@ -1,6 +1,6 @@
 # CKD-Bone: Frailty Fractures in Patients with CKD
 
-Feasibility analysis for Round 2 grant application studying frailty fractures in patients with chronic kidney disease (CKD), using OMOP CDM and OHDSI R packages.
+Feasibility analysis for studying frailty fractures in patients with chronic kidney disease (CKD), using OMOP CDM and OHDSI R packages.
 
 ## Study Design
 
