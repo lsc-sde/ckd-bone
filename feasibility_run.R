@@ -637,10 +637,46 @@ weight_persons <- if (length(weight_codes) > 0) {
     summarise(n = n_distinct(person_id)) |> collect() |> pull(n)
 } else { 0L }
 
+# --- Rural/Urban classification (via location table LSOA + ONS lookup) --------
+# Load ONS Rural-Urban Classification lookup (included in project folder)
+ru_lookup <- read.csv(here("rural_urban.csv"), stringsAsFactors = FALSE) |>
+  select(LSOA21CD, rural_urban_flag = Rural.Urban.flag)
+
+rural_urban_data <- tryCatch({
+  # Join person -> location to get LSOA
+  person_location <- cdm$person |>
+    filter(person_id %in% !!analysis_persons$subject_id) |>
+    select(person_id, location_id) |>
+    inner_join(
+      cdm$location |> select(location_id, location_source_value),
+      by = "location_id"
+    ) |>
+    collect() |> patch_int64()
+
+  # Join LSOA to ONS rural/urban lookup
+  person_location |>
+    mutate(has_lsoa = !is.na(location_source_value) & location_source_value != "") |>
+    left_join(ru_lookup, by = c("location_source_value" = "LSOA21CD"))
+}, error = function(e) {
+  message(glue("  WARN: Could not access location table: {e$message}"))
+  tibble(person_id = integer(0), has_lsoa = logical(0), rural_urban_flag = character(0))
+})
+
+n_rural_urban <- sum(!is.na(rural_urban_data$rural_urban_flag))
+message(glue("Rural/Urban classified (via LSOA -> ONS lookup): {n_rural_urban} of {n3_subjects} persons"))
+
+# Distribution
+ru_distribution <- rural_urban_data |>
+  filter(!is.na(rural_urban_flag)) |>
+  count(rural_urban_flag) |>
+  mutate(pct = round(100 * n / sum(n), 1))
+message("Rural/Urban distribution:")
+print(ru_distribution)
+
 # --- Build missingness table ---
 missingness_table <- tibble(
   Variable = c("Age", "Sex", "Ethnicity", "IMD (study period)", "IMD (any ever)",
-               "BMI", "Height", "Weight", "Frailty Score (PI concept)"),
+               "Rural/Urban", "BMI", "Height", "Weight", "Frailty Score (PI concept)"),
   N_Total = n3_subjects,
   N_Available = c(
     n3_subjects,  # Age always derivable
@@ -648,6 +684,7 @@ missingness_table <- tibble(
     n_eth_best,
     n_imd_study_period,
     n_imd_any,
+    n_rural_urban,
     bmi_persons,
     height_persons,
     weight_persons,
@@ -724,42 +761,6 @@ egfr_timing_table <- egfr_timeliness |>
 
 message("\n--- eGFR Timeliness (days from fracture to closest eGFR) ---")
 print(egfr_timing_table)
-
-# --- Rural/Urban classification (via location table LSOA + ONS lookup) --------
-# Load ONS Rural-Urban Classification lookup (included in project folder)
-ru_lookup <- read.csv(here("rural_urban.csv"), stringsAsFactors = FALSE) |>
-  select(LSOA21CD, rural_urban_flag = Rural.Urban.flag)
-
-rural_urban_data <- tryCatch({
-  # Join person → location to get LSOA
-  person_location <- cdm$person |>
-    filter(person_id %in% !!analysis_persons$subject_id) |>
-    select(person_id, location_id) |>
-    inner_join(
-      cdm$location |> select(location_id, location_source_value),
-      by = "location_id"
-    ) |>
-    collect() |> patch_int64()
-
-  # Join LSOA to ONS rural/urban lookup
-  person_location |>
-    mutate(has_lsoa = !is.na(location_source_value) & location_source_value != "") |>
-    left_join(ru_lookup, by = c("location_source_value" = "LSOA21CD"))
-}, error = function(e) {
-  message(glue("  WARN: Could not access location table: {e$message}"))
-  tibble(person_id = integer(0), has_lsoa = logical(0), rural_urban_flag = character(0))
-})
-
-n_rural_urban <- sum(!is.na(rural_urban_data$rural_urban_flag))
-message(glue("Rural/Urban classified (via LSOA → ONS lookup): {n_rural_urban} of {n3_subjects} persons"))
-
-# Distribution
-ru_distribution <- rural_urban_data |>
-  filter(!is.na(rural_urban_flag)) |>
-  count(rural_urban_flag) |>
-  mutate(pct = round(100 * n / sum(n), 1))
-message("Rural/Urban distribution:")
-print(ru_distribution)
 
 # --- IMD distribution (quintiles, from study period) ---
 imd_distribution <- imd_in_study |>
