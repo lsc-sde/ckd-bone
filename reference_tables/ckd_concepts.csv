@@ -1,0 +1,10 @@
+concept_id,concept_name,domain_id,vocabulary_id,standard_concept,notes
+46271022,Chronic kidney disease stage 1,Condition,SNOMED,S,CKD Stage 1 (GFR >= 90)
+46271023,Chronic kidney disease stage 2,Condition,SNOMED,S,CKD Stage 2 (GFR 60-89)
+46271024,Chronic kidney disease stage 3,Condition,SNOMED,S,CKD Stage 3 (GFR 30-59)
+46271025,Chronic kidney disease stage 3a,Condition,SNOMED,S,CKD Stage 3a (GFR 45-59)
+46271026,Chronic kidney disease stage 3b,Condition,SNOMED,S,CKD Stage 3b (GFR 30-44)
+46271027,Chronic kidney disease stage 4,Condition,SNOMED,S,CKD Stage 4 (GFR 15-29)
+46271028,Chronic kidney disease stage 5,Condition,SNOMED,S,CKD Stage 5 (GFR < 15)
+4030518,End stage renal disease,Condition,SNOMED,S,ESRD / dialysis-dependent CKD
+40481902,Chronic kidney disease,Condition,SNOMED,S,Unspecified CKD (use where stage unknown)

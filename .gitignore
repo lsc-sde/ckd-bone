@@ -1,0 +1,9 @@
+# R artefacts
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Generated study outputs (keep directory structure but not results)
+output/*
+!output/.gitkeep
