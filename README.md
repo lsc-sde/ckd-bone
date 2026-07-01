@@ -66,7 +66,7 @@ generate_codelists     <- TRUE     # Set FALSE after first run (uses cached CSV)
 
 ## Important Notes on Feasibility Code
 
-- **IMD (Index of Multiple Deprivation):** The feasibility code uses IMD as a concept from the OMOP CDM. Sites must have IMD mapped as a concept in their CDM for deprivation analysis to work.
+- **IMD (Index of Multiple Deprivation):** The feasibility code uses IMD as a concept from the OMOP CDM. Sites must have IMD mapped as a concept in their CDM for deprivation analysis to work, or should be able to adjusthe code to join IMD from LSOA (see location note below).
 - **Rural/Urban Classification:** The code uses LSOA (Lower Layer Super Output Area) from the `location_source_value` field to map patients to rural/urban categories via the `rural_urban.csv` lookup file.
 
 ## Partner Site Instructions
