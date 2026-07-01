@@ -64,6 +64,11 @@ generate_codelists     <- TRUE     # Set FALSE after first run (uses cached CSV)
 - `all_codelists_for_partners.csv` — Exportable codelists for partner OMOP sites
 - `CodeUse_*.docx` — Database-wide code usage reports
 
+## Important Notes on Feasibility Code
+
+- **IMD (Index of Multiple Deprivation):** The feasibility code uses IMD as a concept from the OMOP CDM. Sites must have IMD mapped as a concept in their CDM for deprivation analysis to work.
+- **Rural/Urban Classification:** The code uses LSOA (Lower Layer Super Output Area) from the `location_source_value` field to map patients to rural/urban categories via the `rural_urban.csv` lookup file.
+
 ## Partner Site Instructions
 
 1. Clone this repo
