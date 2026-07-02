@@ -1,5 +1,13 @@
 default:
   project_name: "CKD Bone"
+  database:
+    driver: "ODBC Driver 17 for SQL Server"
+    server: "LTHDSDEV"
+    database: "lth_omop"
+    cdm_schema: "gold"
+    write_schema: "dev_if"
+    write_prefix: "feas2_"
+    db_name: "IDRIL_1"
   paths:
     raw_data: "data/raw"
     processed_data: "data/processed"

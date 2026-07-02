@@ -21,14 +21,37 @@ Feasibility analysis for studying frailty fractures in patients with chronic kid
 
 ## Setup
 
-```r
-# Restore packages via renv
+```bash
+# 1. Clone the repo and restore packages
 renv::restore()
 
-# Open feasibility_run.R and update:
-# 1. Database connection parameters (Server, Database, schema)
-# 2. Study parameters (dates, thresholds) in section 0
-# 3. Set generate_codelists = TRUE for first run
+# 2. Copy the config template and fill in your site-specific values
+cp config.yml.example config.yml
+```
+
+Edit `config.yml` with your database connection details:
+
+```yaml
+default:
+  database:
+    driver: "ODBC Driver 17 for SQL Server"
+    server: "YOUR_SERVER_HERE"
+    database: "YOUR_DATABASE_HERE"
+    cdm_schema: "YOUR_CDM_SCHEMA"
+    write_schema: "YOUR_WRITE_SCHEMA"
+    write_prefix: "feas2_"
+    db_name: "YOUR_DB_DISPLAY_NAME"
+```
+
+> **Note:** `config.yml` is in `.gitignore` and will not be committed. Each site maintains their own copy.
+
+Then in R:
+
+```r
+# 3. (Optional) Adjust study parameters in feasibility_run.R section 0
+# 4. Set generate_codelists = TRUE for first run
+# 5. Source or run interactively
+source("feasibility_run.R")
 ```
 
 ## Key Files
@@ -39,7 +62,8 @@ renv::restore()
 | `CKD-Bone.Rproj` | RStudio project file (sets working directory, editor preferences) |
 | `.Rprofile` | Bootstraps `renv` on session start |
 | `rural_urban.csv` | ONS Rural-Urban Classification 2021 lookup (LSOA → Rural/Urban) |
-| `config.yml` | Project configuration |
+| `config.yml` | Site-specific database configuration (not committed — copy from `config.yml.example`) |
+| `config.yml.example` | Template config with placeholder values for partner sites |
 | `renv/` | Package management (renv lockfile + activate script) |
 | `Results/Feasibility2/` | Output directory (HTML report, DOCX tables, codelist CSV) |
 
@@ -74,10 +98,16 @@ generate_codelists     <- TRUE     # Set FALSE after first run (uses cached CSV)
 ## Partner Site Instructions
 
 1. Clone this repo
-2. `renv::restore()` to install packages
-3. Update connection parameters in `feasibility_run.R` section 1
+2. Run `renv::restore()` to install packages
+3. Copy `config.yml.example` to `config.yml` and fill in your site-specific database details:
+   - `server` — your SQL Server hostname
+   - `database` — your OMOP database name
+   - `cdm_schema` — schema containing OMOP CDM tables
+   - `write_schema` — schema where you have write permissions (for temp cohort tables)
+   - `write_prefix` — prefix for tables written by the script (default `"feas2_"`)
+   - `db_name` — a display name for your database (used in reports)
 4. Set `generate_codelists = TRUE` (first run) or use the shared `all_codelists_for_partners.csv`
-5. Run interactively — pre-flight checks will validate your setup immediately
+5. Run interactively — pre-flight checks will validate your config and permissions immediately
 
 ## OMOP Packages Used
 

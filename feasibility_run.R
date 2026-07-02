@@ -82,7 +82,6 @@ out <- here("Results", "Feasibility2")
 # Connection details are read from config.yml (not committed to git).
 # Copy config.yml.example to config.yml and fill in your site-specific values.
 cfg <- config::get()
-
 db_name <- cfg$database$db_name
 
 con <- DBI::dbConnect(
@@ -175,7 +174,7 @@ tryCatch({
 write_ok <- tryCatch({
   test_df <- tibble(subject_id = 1L, cohort_start_date = as.Date("2020-01-01"))
   cdm <- insertTable(cdm, name = "preflight_test", table = test_df)
-  DBI::dbRemoveTable(con, DBI::Id(schema = "YOUR_WRITE_SCHEMA", table = paste0("feas2_", "preflight_test")))
+  DBI::dbRemoveTable(con, DBI::Id(schema = cfg$database$write_schema, table = paste0(cfg$database$write_prefix, "preflight_test")))
   TRUE
 }, error = function(e) { message(glue("  FAIL: writeSchema: {e$message}")); FALSE })
 if (write_ok) { message("  OK: writeSchema writable") } else { preflight_ok <- FALSE }
@@ -1182,3 +1181,4 @@ message(glue("Results directory: {out}"))
 # ============================================================================
 CDMConnector::cdmDisconnect(cdm)
 message("Feasibility 2 complete. Database disconnected.")
+
