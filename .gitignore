@@ -24,3 +24,6 @@ output/
 Results/
 data/raw/
 data/processed/
+
+# Site-specific configuration (contains server/database names)
+config.yml

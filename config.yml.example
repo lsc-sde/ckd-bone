@@ -1,0 +1,22 @@
+## Site-specific configuration for CKD-Bone feasibility analysis
+## Copy this file to config.yml and fill in your local values.
+## config.yml is in .gitignore and will NOT be committed.
+
+default:
+  project_name: "CKD Bone"
+  database:
+    driver: "ODBC Driver 17 for SQL Server"
+    server: "YOUR_SERVER_HERE"
+    database: "YOUR_DATABASE_HERE"
+    cdm_schema: "YOUR_CDM_SCHEMA"
+    write_schema: "YOUR_WRITE_SCHEMA"
+    write_prefix: "feas2_"
+    db_name: "YOUR_DB_DISPLAY_NAME"
+  paths:
+    raw_data: "data/raw"
+    processed_data: "data/processed"
+    output: "output"
+    docs: "docs"
+  options:
+    seed: 123
+    timezone: "Europe/London"

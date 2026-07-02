@@ -78,26 +78,30 @@ out <- here("Results", "Feasibility2")
 # ----------------------------------------------------------------------------
 # 1. DATABASE CONNECTION
 # ----------------------------------------------------------------------------
-db_name <- "YOUR_DB_NAME"
+# Connection details are read from config.yml (not committed to git).
+# Copy config.yml.example to config.yml and fill in your site-specific values.
+cfg <- config::get()
+
+db_name <- cfg$database$db_name
 
 con <- DBI::dbConnect(
   odbc::odbc(),
-  Driver   = "ODBC Driver 17 for SQL Server",
-  Server   = "YOUR_SERVER",
-  Database = "YOUR_DATABASE",
+  Driver   = cfg$database$driver,
+  Server   = cfg$database$server,
+  Database = cfg$database$database,
   trusted_connection = "yes"
 )
 
 cdm <- cdmFromCon(
   con         = con,
-  cdmSchema   = "YOUR_CDM_SCHEMA",
-  writeSchema = "YOUR_WRITE_SCHEMA",
-  writePrefix = "feas2_"
+  cdmSchema   = cfg$database$cdm_schema,
+  writeSchema = cfg$database$write_schema,
+  writePrefix = cfg$database$write_prefix
 )
 
 message(glue("Connected to CDM: {cdmName(cdm)} | Version: {cdmVersion(cdm)}"))
 
-# --- Server-side type patches -------------------------------------------------
+# --- Server-side type patches for LTHT  -------------------------------------------------
 if ("observation_period" %in% names(cdm)) {
   cdm$observation_period <- cdm$observation_period |>
     mutate(
