@@ -21,7 +21,7 @@
 #   - Creatinine characterisation (median count, median value pre-fracture)
 #   - Demographic missingness (age, sex, ethnicity, IMD, BMI)
 #   - Comorbidity prevalence
-#   - PI frailty concept proof
+#   - Frailty score characterisation (Rockwood/CFS)
 #   - Exported codelists CSV for partner sites
 #   - Consolidated feasibility report (HTML)
 # ============================================================================
@@ -63,8 +63,9 @@ lookback_creatinine_days <- 1825    # 5 years
 generate_codelists <- TRUE
 
 # --- Known concept IDs for this OMOP instance --------------------------------
-egfr_known  <- 40771922L
-creat_known <- 3020564L
+egfr_known     <- 40771922L
+creat_known    <- 3020564L
+frailty_known  <- 40483383L   # LTHT frailty score concept
 
 # --- Client-side type helper --------------------------------------------------
 patch_int64 <- function(df) {
@@ -259,17 +260,16 @@ if (generate_codelists) {
     ids
   }) |> newCodelist()
 
-  # --- 2f. PI Frailty concept ---
-  frailty_vocab_lookup <- cdm$concept |>
-    filter(concept_code == "1423651000000100", vocabulary_id == "SNOMED") |> collect()
-  if (nrow(frailty_vocab_lookup) > 0) {
-    pi_frailty_concept_id <- frailty_vocab_lookup$concept_id
-    message(glue("PI Frailty SNOMED resolved to concept_id: {paste(pi_frailty_concept_id, collapse=', ')}"))
-  } else {
-    pi_frailty_concept_id <- integer(0)
-    message("PI Frailty SNOMED 1423651000000100 NOT FOUND in vocabulary.")
-  }
-  pi_frailty_codelist <- newCodelist(list("PI_Frailty_Score" = pi_frailty_concept_id))
+  # --- 2f. Frailty Score (known concept + generated) ---
+  # Uses LTHT-specific concept 40483383 plus keyword search for frailty/rockwood
+  frailty_codes_search <- tryCatch(
+    getCandidateCodes(cdm = cdm, keywords = c("frailty", "rockwood frailty score"),
+                      domains = "Measurement", includeDescendants = TRUE) |> pull(concept_id),
+    error = function(e) integer(0)
+  )
+  frailty_codes <- unique(c(frailty_known, frailty_codes_search))
+  frailty_codelist <- newCodelist(list("frailty_score" = frailty_codes))
+  message(glue("Frailty score codelist: {length(frailty_codes)} concepts (includes known {frailty_known})"))
 
   # --- 2g. IMD ---
   imd_source_concept_id <- 35812882
@@ -316,12 +316,9 @@ if (generate_codelists) {
     tibble(codelist = "height",          concept_id = height_codes),
     tibble(codelist = "weight",          concept_id = weight_codes),
     tibble(codelist = "calcium",         concept_id = calcium_codes_search),
+    tibble(codelist = "frailty_score",   concept_id = frailty_codes),
     purrr::imap_dfr(as.list(comorbidity_codes), ~ tibble(codelist = .y, concept_id = .x))
   )
-  if (length(pi_frailty_concept_id) > 0) {
-    codelist_export <- bind_rows(codelist_export,
-                                 tibble(codelist = "PI_Frailty_Score", concept_id = pi_frailty_concept_id))
-  }
   write.csv(codelist_export, file.path(out, "all_codelists_for_partners.csv"), row.names = FALSE)
   message(glue("Codelists exported: {nrow(codelist_export)} rows, {n_distinct(codelist_export$codelist)} lists"))
 
@@ -348,16 +345,16 @@ if (generate_codelists) {
   calcium_codes     <- codelist_export |> filter(codelist == "calcium") |> pull(concept_id)
   calcium_codelist  <- newCodelist(list("calcium" = calcium_codes))
 
+  frailty_codes     <- codelist_export |> filter(codelist == "frailty_score") |> pull(concept_id)
+  frailty_codelist  <- newCodelist(list("frailty_score" = frailty_codes))
+
   comorbidity_names <- setdiff(
     unique(codelist_export$codelist),
-    c("frailty_fracture", "egfr", "creatinine", "ckd_diagnosis", "bmi", "height", "weight", "calcium", "PI_Frailty_Score")
+    c("frailty_fracture", "egfr", "creatinine", "ckd_diagnosis", "bmi", "height", "weight", "calcium", "frailty_score")
   )
   comorbidity_codes <- purrr::map(comorbidity_names, ~ {
     codelist_export |> filter(codelist == .x) |> pull(concept_id)
   }) |> setNames(comorbidity_names) |> newCodelist()
-
-  pi_frailty_concept_id <- codelist_export |> filter(codelist == "PI_Frailty_Score") |> pull(concept_id)
-  pi_frailty_codelist <- newCodelist(list("PI_Frailty_Score" = pi_frailty_concept_id))
 
   imd_source_concept_id <- 35812882
 
@@ -384,14 +381,10 @@ creatinine_code_use <- summariseCodeUse(creatinine_codelist, cdm = cdm)
 tableCodeUse(creatinine_code_use, type = "flextable") |>
   flextable::save_as_docx(path = file.path(out, "CodeUse_Creatinine.docx"))
 
-if (length(pi_frailty_concept_id) > 0) {
-  message("Checking PI Frailty concept use...")
-  frailty_global_usage <- summariseCodeUse(pi_frailty_codelist, cdm = cdm)
-  tableCodeUse(frailty_global_usage, type = "flextable") |>
-    flextable::save_as_docx(path = file.path(out, "CodeUse_PI_Frailty.docx"))
-} else {
-  message("PI Frailty concept not in vocabulary — zero records by definition.")
-}
+message("Checking frailty score code use...")
+frailty_code_use <- summariseCodeUse(frailty_codelist, cdm = cdm)
+tableCodeUse(frailty_code_use, type = "flextable") |>
+  flextable::save_as_docx(path = file.path(out, "CodeUse_Frailty.docx"))
 
 message("========== CODE USE DIAGNOSTICS COMPLETE ==========\n")
 
@@ -696,10 +689,40 @@ ru_distribution <- rural_urban_data |>
 message("Rural/Urban distribution:")
 print(ru_distribution)
 
+# --- Frailty Score (query measurement table for value_as_number) ---
+frailty_codes_vec <- as.list(frailty_codelist)[["frailty_score"]]
+all_frailty_raw <- cdm$measurement |>
+  filter(measurement_concept_id %in% !!frailty_codes_vec,
+         person_id %in% !!analysis_persons$subject_id) |>
+  select(person_id, measurement_date, value_as_number) |>
+  collect() |> patch_int64()
+
+# Join to analysis cohort: latest frailty score up to fracture date
+frailty_pre_fx <- analysis_persons |>
+  inner_join(all_frailty_raw, by = c("subject_id" = "person_id")) |>
+  filter(measurement_date <= cohort_start_date, !is.na(value_as_number))
+
+# Latest frailty score per patient
+frailty_latest <- frailty_pre_fx |>
+  group_by(subject_id) |>
+  slice_max(measurement_date, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+n_frailty_available <- n_distinct(frailty_latest$subject_id)
+message(glue("Frailty score available (any prior to fracture): {n_frailty_available} of {n3_subjects} ({round(100*n_frailty_available/n3_subjects,1)}%)"))
+
+# Frailty score distribution (counts by score value)
+frailty_score_dist <- frailty_latest |>
+  count(value_as_number) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  arrange(value_as_number)
+message("Frailty score distribution (latest score per patient):")
+print(frailty_score_dist)
+
 # --- Build missingness table ---
 missingness_table <- tibble(
   Variable = c("Age", "Sex", "Ethnicity", "IMD (study period)", "IMD (any ever)",
-               "Rural/Urban", "BMI", "Height", "Weight", "Frailty Score (PI concept)"),
+               "Rural/Urban", "BMI", "Height", "Weight", "Frailty Score"),
   N_Total = n3_subjects,
   N_Available = c(
     n3_subjects,  # Age always derivable
@@ -711,7 +734,7 @@ missingness_table <- tibble(
     bmi_persons,
     height_persons,
     weight_persons,
-    0L  # PI frailty not in vocab
+    n_frailty_available
   )
 ) |>
   mutate(
@@ -763,41 +786,82 @@ cdm$analysis_cohort <- cdm$analysis_cohort |>
     nameStyle  = "ckd_dx_flag"
   )
 
-# --- Lab-based Hypercalcaemia (Ca > 2.6 mmol/L, any time prior to fracture) ---
-# Rationale: Hypercalcaemia is often recorded as an abnormal lab result rather than
-# a coded condition diagnosis. This supplements the condition-based flag above.
-# Threshold: adjusted calcium > 2.6 mmol/L (upper limit of normal per NICE CKD guidelines).
+# --- Lab-based Hypercalcaemia & Hypocalcaemia (unit-aware) -------------------
+# Thresholds (adjusted calcium, per NICE CKD guidelines):
+#   Hypercalcaemia: > 2.6 mmol/L  (or > 10.4 mg/dL)
+#   Hypocalcaemia:  < 2.2 mmol/L  (or < 8.8 mg/dL)
+# The code checks unit_concept_id and standardises to mmol/L before thresholding.
+# OMOP standard unit concept IDs: 8753 = mmol/L, 8840 = mg/dL
+# Heuristic fallback: if unit unknown, values > 20 assumed mg/dL (normal Ca ~2.2-2.6 mmol/L).
 calcium_codes_vec <- as.list(calcium_codelist)[["calcium"]]
 hypercalcaemia_lab <- if (length(calcium_codes_vec) > 0) {
-  message("Computing lab-based hypercalcaemia (Ca > 2.6 mmol/L)...")
+  message("Computing lab-based calcium abnormalities (unit-aware)...")
   all_calcium_raw <- cdm$measurement |>
     filter(measurement_concept_id %in% !!calcium_codes_vec,
            person_id %in% !!analysis_persons$subject_id) |>
-    select(person_id, measurement_date, value_as_number) |>
+    select(person_id, measurement_date, value_as_number, unit_concept_id) |>
     collect() |> patch_int64()
+
+  # Report unit distribution
+  unit_dist <- all_calcium_raw |>
+    count(unit_concept_id) |> arrange(desc(n))
+  message("  Calcium unit_concept_id distribution:")
+  print(unit_dist)
+
+  # Standardise to mmol/L
+  # unit_concept_id: 8753 = mmol/L, 8840 = mg/dL
+  all_calcium_std <- all_calcium_raw |>
+    mutate(
+      ca_mmol = case_when(
+        unit_concept_id == 8840 ~ value_as_number / 4,    # mg/dL → mmol/L (approx)
+        unit_concept_id == 8753 ~ value_as_number,         # already mmol/L
+        value_as_number > 20    ~ value_as_number / 4,     # heuristic: likely mg/dL
+        TRUE                    ~ value_as_number           # assume mmol/L
+      )
+    )
 
   # Join to analysis cohort, restrict to prior-to-fracture measurements
   calcium_pre_fx <- analysis_persons |>
-    inner_join(all_calcium_raw, by = c("subject_id" = "person_id")) |>
+    inner_join(all_calcium_std, by = c("subject_id" = "person_id")) |>
     filter(measurement_date <= cohort_start_date,
-           !is.na(value_as_number))
+           !is.na(ca_mmol))
 
-  # Flag: any calcium > 2.6 mmol/L prior to fracture
+  # Flag: any calcium > 2.6 mmol/L prior to fracture (hypercalcaemia)
   hypercalcaemia_patients <- calcium_pre_fx |>
-    filter(value_as_number > 2.6) |>
+    filter(ca_mmol > 2.6) |>
     distinct(subject_id)
 
   n_hypercalcaemia_lab <- nrow(hypercalcaemia_patients)
   pct_hypercalcaemia_lab <- round(100 * n_hypercalcaemia_lab / n3_subjects, 1)
-  message(glue("  Hypercalcaemia (lab: Ca > 2.6): {n_hypercalcaemia_lab} ({pct_hypercalcaemia_lab}%) of analysis cohort"))
+  message(glue("  Hypercalcaemia (lab: Ca > 2.6 mmol/L): {n_hypercalcaemia_lab} ({pct_hypercalcaemia_lab}%) of analysis cohort"))
   message(glue("  Total calcium measurements (pre-fracture): {nrow(calcium_pre_fx)} across {n_distinct(calcium_pre_fx$subject_id)} patients"))
 
   list(n = n_hypercalcaemia_lab, pct = pct_hypercalcaemia_lab,
        n_with_ca = n_distinct(calcium_pre_fx$subject_id),
        n_measurements = nrow(calcium_pre_fx))
 } else {
-  message("  No calcium concept IDs available — skipping lab-based hypercalcaemia.")
+  message("  No calcium concept IDs available — skipping lab-based calcaemia.")
   list(n = 0L, pct = 0, n_with_ca = 0L, n_measurements = 0L)
+}
+
+# --- Lab-based Hypocalcaemia (Ca < 2.2 mmol/L / < 8.8 mg/dL) ---
+# Uses the same unit-standardised calcium_pre_fx from above.
+hypocalcaemia_lab <- if (length(calcium_codes_vec) > 0 && exists("calcium_pre_fx")) {
+  message("Computing lab-based hypocalcaemia (Ca < 2.2 mmol/L)...")
+
+  # Flag: any calcium < 2.2 mmol/L prior to fracture
+  hypocalcaemia_patients <- calcium_pre_fx |>
+    filter(ca_mmol < 2.2) |>
+    distinct(subject_id)
+
+  n_hypocalcaemia_lab <- nrow(hypocalcaemia_patients)
+  pct_hypocalcaemia_lab <- round(100 * n_hypocalcaemia_lab / n3_subjects, 1)
+  message(glue("  Hypocalcaemia (lab: Ca < 2.2 mmol/L): {n_hypocalcaemia_lab} ({pct_hypocalcaemia_lab}%) of analysis cohort"))
+
+  list(n = n_hypocalcaemia_lab, pct = pct_hypocalcaemia_lab)
+} else {
+  message("  No calcium data available — skipping lab-based hypocalcaemia.")
+  list(n = 0L, pct = 0)
 }
 
 # --- eGFR timeliness (days from fracture to closest eGFR) ---
@@ -808,16 +872,14 @@ egfr_timeliness <- egfr_below_threshold |>
     timing_cat = case_when(
       abs_days <= 1  ~ "Same day",
       abs_days <= 7  ~ "Within 1 week",
-      abs_days <= 14 ~ "1-2 weeks",
-      abs_days <= 28 ~ "2-4 weeks",
-      TRUE           ~ ">4 weeks"
+      TRUE           ~ "1 week+"
     )
   )
 
 egfr_timing_table <- egfr_timeliness |>
   count(timing_cat) |>
   mutate(pct = round(100 * n / sum(n), 1)) |>
-  arrange(match(timing_cat, c("Same day", "Within 1 week", "1-2 weeks", "2-4 weeks", ">4 weeks")))
+  arrange(match(timing_cat, c("Same day", "Within 1 week", "1 week+")))
 
 message("\n--- eGFR Timeliness (days from fracture to closest eGFR) ---")
 print(egfr_timing_table)
@@ -955,13 +1017,22 @@ table1_full <- bind_rows(
   egfr_timing_table |> transmute(Variable = glue("  {timing_cat}"), Value = as.character(n), Pct = as.character(pct)),
   tibble(Variable = "--- Comorbidities (prior to fracture) ---", Value = "", Pct = ""),
   comorbidity_table1,
-  tibble(Variable = "--- Lab-based Comorbidities (measurement > threshold) ---", Value = "", Pct = ""),
+  tibble(Variable = "--- Lab-based Comorbidities (measurement threshold) ---", Value = "", Pct = ""),
   tibble(Variable = "  Hypercalcaemia (lab: Ca > 2.6 mmol/L)",
          Value = as.character(hypercalcaemia_lab$n),
          Pct = as.character(hypercalcaemia_lab$pct)),
+  tibble(Variable = "  Hypocalcaemia (lab: Ca < 2.2 mmol/L)",
+         Value = as.character(hypocalcaemia_lab$n),
+         Pct = as.character(hypocalcaemia_lab$pct)),
   tibble(Variable = "    Patients with any Ca measurement (pre-fracture)",
          Value = as.character(hypercalcaemia_lab$n_with_ca),
-         Pct = as.character(round(100 * hypercalcaemia_lab$n_with_ca / n3_subjects, 1)))
+         Pct = as.character(round(100 * hypercalcaemia_lab$n_with_ca / n3_subjects, 1))),
+  tibble(Variable = "--- Frailty Score (latest prior to fracture) ---", Value = "", Pct = ""),
+  tibble(Variable = "  Frailty score available",
+         Value = as.character(n_frailty_available),
+         Pct = as.character(round(100 * n_frailty_available / n3_subjects, 1))),
+  frailty_score_dist |>
+    transmute(Variable = glue("    Score {value_as_number}"), Value = as.character(n), Pct = as.character(pct))
 )
 
 message("\n--- TABLE 1 ---")
@@ -1063,22 +1134,29 @@ report_lines <- c(
   "<li><strong>5-40% missing:</strong> Multiple imputation (MICE) recommended; include auxiliary variables</li>",
   "<li><strong>&gt;40% missing:</strong> Exclude from primary analysis; report descriptively only</li>",
   "<li><strong>Ethnicity:</strong> Likely &gt;90% missing in UK hospital EHR — exclude from primary models, report descriptively</li>",
-  "<li><strong>PI Frailty:</strong> Not recorded. Alternative: derive Hospital Frailty Risk Score (HFRS) from ICD-10 codes (Gilbert et al. 2018)</li>",
+  "<li><strong>Frailty:</strong> If unavailable at partner sites, consider Hospital Frailty Risk Score (HFRS) from ICD-10 codes (Gilbert et al. 2018)</li>",
   "<li><strong>IMD:</strong> Linked by LSOA. If partially available, multiple imputation assuming MAR is appropriate</li>",
   "<li><strong>BMI:</strong> If sparse, consider using weight alone or omitting from primary model</li>",
   "</ul></div>",
   "",
-  # --- Section 7: Frailty ---
-  "<h2>7. PI Frailty Concept</h2>",
-  glue("<p>SNOMED code 1423651000000100 — <strong class='red'>NOT FOUND</strong> in local OMOP vocabulary.</p>"),
-  "<p>This concept has no concept_id mapping and no records in any domain table. Partner sites should verify independently.</p>",
+  # --- Section 7: Frailty Score ---
+  "<h2>7. Frailty Score</h2>",
+  glue("<p>Frailty score available for <span class='key-stat'>{n_frailty_available}</span> of {n3_subjects} patients ({round(100*n_frailty_available/n3_subjects,1)}%).</p>"),
+  glue("<p>Concept IDs used: {paste(frailty_codes_vec, collapse=', ')} (includes LTHT-specific {frailty_known})</p>"),
+  "<h3>Latest Frailty Score Distribution (prior to fracture)</h3>",
+  "<table><tr><th>Score</th><th>N</th><th>%</th></tr>",
+  purrr::pmap_chr(frailty_score_dist, function(value_as_number, n, pct) {
+    glue("<tr><td>{value_as_number}</td><td>{n}</td><td>{pct}%</td></tr>")
+  }),
+  "</table>",
   "",
   # --- Section 8: Codelists ---
   "<h2>8. Codelist Summary</h2>",
   "<p>Full codelists exported to <code>all_codelists_for_partners.csv</code></p>",
   "<table><tr><th>Codelist</th><th>N Concepts</th><th>Sample Concept IDs</th></tr>",
   purrr::pmap_chr(codelist_html_rows, function(codelist, n_concepts, concept_ids_sample) {
-    glue("<tr><td>{codelist}</td><td>{n_concepts}</td><td><code>{concept_ids_sample}</code></td></tr>")
+    pretty_name <- str_replace_all(codelist, "_", " ") |> str_to_title()
+    glue("<tr><td>{pretty_name}</td><td>{n_concepts}</td><td><code>{concept_ids_sample}</code></td></tr>")
   }),
   "</table>",
   "",
