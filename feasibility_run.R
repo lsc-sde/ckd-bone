@@ -59,7 +59,8 @@ lookback_creatinine_days <- 1825    # 5 years
 
 # --- Toggle: generate codelists or use cached? ------------------------------
 # Set FALSE after first run to skip expensive codelist generation.
-generate_codelists <- FALSE
+# NOTE: Set TRUE to regenerate after adding thyrotoxicosis keywords and calcium codelist.
+generate_codelists <- TRUE
 
 # --- Known concept IDs for this OMOP instance --------------------------------
 egfr_known  <- 40771922L
@@ -231,7 +232,7 @@ if (generate_codelists) {
     "Cancer"                     = c("malignant neoplasm"),
     "Osteoporosis"               = c("osteoporosis"),
     "Arthritis"                  = c("rheumatoid arthritis", "inflammatory arthritis"),
-    "Hyperthyroidism"            = c("hyperthyroidism"),
+    "Hyperthyroidism"            = c("hyperthyroidism", "thyrotoxicosis"),
     "Hypoparathyroidism"         = c("hypoparathyroidism"),
     "Hyperparathyroidism"        = c("hyperparathyroidism"),
     "Undernutrition"             = c("malnutrition", "undernutrition"),
@@ -287,6 +288,20 @@ if (generate_codelists) {
   )
   message(glue("BMI: {length(bmi_codes)} concepts | Height: {length(height_codes)} | Weight: {length(weight_codes)}"))
 
+  # --- 2i. Calcium (for lab-based hypercalcaemia definition) ---
+  # Hypercalcaemia may not be coded as a condition in all datasets.
+  # Lab-based definition: serum/plasma calcium > 2.6 mmol/L (upper limit of normal).
+  # Excludes ionised calcium and urine calcium to avoid false positives.
+  calcium_codes_search <- tryCatch({
+    candidates <- getCandidateCodes(cdm = cdm, keywords = c("calcium"),
+                                    domains = "Measurement", includeDescendants = TRUE)
+    candidates |>
+      filter(!str_detect(str_to_lower(concept_name), "ionized|ionised|urine|24.hour|24h|ratio|clearance|score")) |>
+      pull(concept_id) |> unique()
+  }, error = function(e) { message(glue("  Warning: Calcium codelist failed: {e$message}")); integer(0) })
+  calcium_codelist <- newCodelist(list("calcium" = calcium_codes_search))
+  message(glue("Calcium (serum/plasma) codelist: {length(calcium_codes_search)} concepts"))
+
   # --- Export codelists ---
   codelist_export <- bind_rows(
     tibble(codelist = "frailty_fracture", concept_id = fracture_concept_ids),
@@ -296,6 +311,7 @@ if (generate_codelists) {
     tibble(codelist = "bmi",             concept_id = bmi_codes),
     tibble(codelist = "height",          concept_id = height_codes),
     tibble(codelist = "weight",          concept_id = weight_codes),
+    tibble(codelist = "calcium",         concept_id = calcium_codes_search),
     purrr::imap_dfr(as.list(comorbidity_codes), ~ tibble(codelist = .y, concept_id = .x))
   )
   if (length(pi_frailty_concept_id) > 0) {
@@ -325,9 +341,12 @@ if (generate_codelists) {
   creatinine_codelist  <- newCodelist(list("creatinine" = creatinine_codes))
   ckd_diag_codelist    <- newCodelist(list("ckd_diagnosis" = ckd_diag_ids))
 
+  calcium_codes     <- codelist_export |> filter(codelist == "calcium") |> pull(concept_id)
+  calcium_codelist  <- newCodelist(list("calcium" = calcium_codes))
+
   comorbidity_names <- setdiff(
     unique(codelist_export$codelist),
-    c("frailty_fracture", "egfr", "creatinine", "ckd_diagnosis", "bmi", "height", "weight", "PI_Frailty_Score")
+    c("frailty_fracture", "egfr", "creatinine", "ckd_diagnosis", "bmi", "height", "weight", "calcium", "PI_Frailty_Score")
   )
   comorbidity_codes <- purrr::map(comorbidity_names, ~ {
     codelist_export |> filter(codelist == .x) |> pull(concept_id)
@@ -740,6 +759,43 @@ cdm$analysis_cohort <- cdm$analysis_cohort |>
     nameStyle  = "ckd_dx_flag"
   )
 
+# --- Lab-based Hypercalcaemia (Ca > 2.6 mmol/L, any time prior to fracture) ---
+# Rationale: Hypercalcaemia is often recorded as an abnormal lab result rather than
+# a coded condition diagnosis. This supplements the condition-based flag above.
+# Threshold: adjusted calcium > 2.6 mmol/L (upper limit of normal per NICE CKD guidelines).
+calcium_codes_vec <- as.list(calcium_codelist)[["calcium"]]
+hypercalcaemia_lab <- if (length(calcium_codes_vec) > 0) {
+  message("Computing lab-based hypercalcaemia (Ca > 2.6 mmol/L)...")
+  all_calcium_raw <- cdm$measurement |>
+    filter(measurement_concept_id %in% !!calcium_codes_vec,
+           person_id %in% !!analysis_persons$subject_id) |>
+    select(person_id, measurement_date, value_as_number) |>
+    collect() |> patch_int64()
+
+  # Join to analysis cohort, restrict to prior-to-fracture measurements
+  calcium_pre_fx <- analysis_persons |>
+    inner_join(all_calcium_raw, by = c("subject_id" = "person_id")) |>
+    filter(measurement_date <= cohort_start_date,
+           !is.na(value_as_number))
+
+  # Flag: any calcium > 2.6 mmol/L prior to fracture
+  hypercalcaemia_patients <- calcium_pre_fx |>
+    filter(value_as_number > 2.6) |>
+    distinct(subject_id)
+
+  n_hypercalcaemia_lab <- nrow(hypercalcaemia_patients)
+  pct_hypercalcaemia_lab <- round(100 * n_hypercalcaemia_lab / n3_subjects, 1)
+  message(glue("  Hypercalcaemia (lab: Ca > 2.6): {n_hypercalcaemia_lab} ({pct_hypercalcaemia_lab}%) of analysis cohort"))
+  message(glue("  Total calcium measurements (pre-fracture): {nrow(calcium_pre_fx)} across {n_distinct(calcium_pre_fx$subject_id)} patients"))
+
+  list(n = n_hypercalcaemia_lab, pct = pct_hypercalcaemia_lab,
+       n_with_ca = n_distinct(calcium_pre_fx$subject_id),
+       n_measurements = nrow(calcium_pre_fx))
+} else {
+  message("  No calcium concept IDs available — skipping lab-based hypercalcaemia.")
+  list(n = 0L, pct = 0, n_with_ca = 0L, n_measurements = 0L)
+}
+
 # --- eGFR timeliness (days from fracture to closest eGFR) ---
 # Reference: Levey et al. 2009 CKD-EPI; reporting timing per KDIGO guidance
 egfr_timeliness <- egfr_below_threshold |>
@@ -894,7 +950,14 @@ table1_full <- bind_rows(
   tibble(Variable = "--- eGFR Timeliness ---", Value = "", Pct = ""),
   egfr_timing_table |> transmute(Variable = glue("  {timing_cat}"), Value = as.character(n), Pct = as.character(pct)),
   tibble(Variable = "--- Comorbidities (prior to fracture) ---", Value = "", Pct = ""),
-  comorbidity_table1
+  comorbidity_table1,
+  tibble(Variable = "--- Lab-based Comorbidities (measurement > threshold) ---", Value = "", Pct = ""),
+  tibble(Variable = "  Hypercalcaemia (lab: Ca > 2.6 mmol/L)",
+         Value = as.character(hypercalcaemia_lab$n),
+         Pct = as.character(hypercalcaemia_lab$pct)),
+  tibble(Variable = "    Patients with any Ca measurement (pre-fracture)",
+         Value = as.character(hypercalcaemia_lab$n_with_ca),
+         Pct = as.character(round(100 * hypercalcaemia_lab$n_with_ca / n3_subjects, 1)))
 )
 
 message("\n--- TABLE 1 ---")
