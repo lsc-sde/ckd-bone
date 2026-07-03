@@ -50,22 +50,33 @@ library(gt)
 library(purrr)
 
 # --- Study parameters --------------------------------------------------------
-study_start            <- as.Date("2023-01-01")
-study_end              <- as.Date("2026-06-25")
+study_start            <- as.Date("2022-01-01")
+study_end              <- as.Date("2023-12-31")
 min_age                <- 50
 egfr_threshold         <- 44        # eGFR cut-off for analysis cohort
 egfr_window_days       <- 28        # ±4 weeks around fracture date
 lookback_creatinine_days <- 1825    # 5 years
+suppression_threshold  <- 5         # Cell suppression: counts < this are masked (i.e. 1-4)
 
 # --- Toggle: generate codelists or use cached? ------------------------------
 # Set FALSE after first run to skip expensive codelist generation.
 # NOTE: Set TRUE to regenerate after adding thyrotoxicosis keywords and calcium codelist.
-generate_codelists <- TRUE
+generate_codelists <- FALSE
 
 # --- Known concept IDs for this OMOP instance --------------------------------
 egfr_known     <- 40771922L
 creat_known    <- 3020564L
 frailty_known  <- 40483383L   # LTHT frailty score concept
+
+# --- Cell suppression helper --------------------------------------------------
+# Masks counts below suppression_threshold to prevent disclosure of small cells.
+# Returns "<5" (or appropriate label) for suppressed values, otherwise the count as string.
+suppress_count <- function(n, threshold = suppression_threshold) {
+  if_else(n > 0 & n < threshold, paste0("<", threshold), as.character(n))
+}
+suppress_pct <- function(n, pct, threshold = suppression_threshold) {
+  if_else(n > 0 & n < threshold, "-", as.character(pct))
+}
 
 # --- Client-side type helper --------------------------------------------------
 patch_int64 <- function(df) {
@@ -508,13 +519,18 @@ creat_pre_fx <- analysis_persons |>
     measurement_date <= cohort_start_date
   )
 
-n4_subjects <- n_distinct(creat_pre_fx$subject_id)
-n4_pct <- round(100 * n4_subjects / n3_subjects, 1)
-
-# Median count per patient
+# Count creatinine measurements per patient
 creat_count_per_patient <- creat_pre_fx |>
   group_by(subject_id) |>
   summarise(n_creat = n(), median_value = median(value_as_number, na.rm = TRUE), .groups = "drop")
+
+# N4a: ≥1 creatinine in lookback period
+n4a_subjects <- n_distinct(creat_pre_fx$subject_id)
+n4a_pct <- round(100 * n4a_subjects / n3_subjects, 1)
+
+# N4b: ≥5 creatinine in lookback period
+n4b_subjects <- creat_count_per_patient |> filter(n_creat >= 5) |> nrow()
+n4b_pct <- round(100 * n4b_subjects / n3_subjects, 1)
 
 creat_summary <- creat_count_per_patient |>
   summarise(
@@ -526,7 +542,8 @@ creat_summary <- creat_count_per_patient |>
                        round(quantile(median_value, 0.75, na.rm = TRUE), 1))
   )
 
-message(glue("N4 (≥1 creatinine in 5yr pre-fracture): {n4_subjects} ({n4_pct}%) of analysis cohort"))
+message(glue("N4a (>=1 creatinine in {lookback_creatinine_days/365}yr pre-fracture): {n4a_subjects} ({n4a_pct}%) of analysis cohort"))
+message(glue("N4b (>=5 creatinine in {lookback_creatinine_days/365}yr pre-fracture): {n4b_subjects} ({n4b_pct}%) of analysis cohort"))
 message("Creatinine summary (5yr pre-fracture):")
 print(creat_summary)
 
@@ -536,16 +553,18 @@ attrition_table <- tibble(
     glue("N1: Frailty fracture (age>={min_age}, {study_start} to {study_end})"),
     glue("N2: eGFR measurement within +/-{egfr_window_days} days"),
     glue("N3: eGFR < {egfr_threshold} (analysis cohort)"),
-    glue("N4: >=1 creatinine in {lookback_creatinine_days/365}yr pre-fracture"),
+    glue("N4a: >=1 creatinine in {lookback_creatinine_days/365}yr pre-fracture"),
+    glue("N4b: >=5 creatinine in {lookback_creatinine_days/365}yr pre-fracture"),
     "N5: eGFR < 30"
   ),
-  N = c(n1_subjects, n2_subjects, n3_subjects, n4_subjects, n5_subjects),
-  Pct_of_N1 = round(100 * c(n1_subjects, n2_subjects, n3_subjects, n4_subjects, n5_subjects) / n1_subjects, 1),
+  N = c(n1_subjects, n2_subjects, n3_subjects, n4a_subjects, n4b_subjects, n5_subjects),
+  Pct_of_N1 = round(100 * c(n1_subjects, n2_subjects, n3_subjects, n4a_subjects, n4b_subjects, n5_subjects) / n1_subjects, 1),
   Pct_of_previous = c(
     100,
     round(100 * n2_subjects / n1_subjects, 1),
     round(100 * n3_subjects / n2_subjects, 1),
-    round(100 * n4_subjects / n3_subjects, 1),
+    round(100 * n4a_subjects / n3_subjects, 1),
+    round(100 * n4b_subjects / n3_subjects, 1),
     round(100 * n5_subjects / n3_subjects, 1)
   )
 )
@@ -711,12 +730,20 @@ n_frailty_available <- n_distinct(frailty_latest$subject_id)
 message(glue("Frailty score available (any prior to fracture): {n_frailty_available} of {n3_subjects} ({round(100*n_frailty_available/n3_subjects,1)}%)"))
 
 # Frailty score distribution (counts by score value)
+# Rockwood Clinical Frailty Scale: 1 = Very Fit, 2 = Well, 3 = Managing Well,
+# 4 = Vulnerable, 5 = Mildly Frail, 6 = Moderately Frail, 7 = Severely Frail,
+# 8 = Very Severely Frail, 9 = Terminally Ill.  Lower = less frail.
 frailty_score_dist <- frailty_latest |>
   count(value_as_number) |>
-  mutate(pct = round(100 * n / sum(n), 1)) |>
+  mutate(
+    pct = round(100 * n / sum(n), 1),
+    # Suppress counts below threshold for disclosure control
+    n_display = suppress_count(n),
+    pct_display = suppress_pct(n, pct)
+  ) |>
   arrange(value_as_number)
-message("Frailty score distribution (latest score per patient):")
-print(frailty_score_dist)
+message("Frailty score distribution (Rockwood CFS: 1=Very Fit … 9=Terminally Ill):")
+print(frailty_score_dist |> select(value_as_number, n_display, pct_display))
 
 # --- Build missingness table ---
 missingness_table <- tibble(
@@ -910,49 +937,50 @@ table1_rows$age <- tibble(Variable = "Age, median (IQR)",
 age_groups <- table1_local |>
   count(age_group) |> mutate(pct = round(100 * n / sum(n), 1))
 table1_rows$age_grp <- age_groups |>
-  transmute(Variable = glue("  Age {age_group}"), Value = as.character(n), Pct = as.character(pct))
+  transmute(Variable = glue("  Age {age_group}"), Value = suppress_count(n), Pct = suppress_pct(n, pct))
 
 # Sex
 sex_dist <- table1_local |> count(sex) |> mutate(pct = round(100 * n / sum(n), 1))
 table1_rows$sex <- sex_dist |>
-  transmute(Variable = glue("  Sex: {sex}"), Value = as.character(n), Pct = as.character(pct))
+  transmute(Variable = glue("  Sex: {sex}"), Value = suppress_count(n), Pct = suppress_pct(n, pct))
 
 # Ethnicity
 table1_rows$ethnicity <- tibble(
   Variable = glue("Ethnicity available (from {eth_source_field})"),
-  Value = as.character(n_eth_best),
-  Pct = as.character(round(100 * n_eth_best / n3_subjects, 1))
+  Value = suppress_count(n_eth_best),
+  Pct = suppress_pct(n_eth_best, round(100 * n_eth_best / n3_subjects, 1))
 )
 
 # Death
 table1_rows$death <- tibble(Variable = "Death (any time after fracture)",
-                             Value = as.character(n_died), Pct = as.character(n_died_pct))
+                             Value = suppress_count(n_died),
+                             Pct = suppress_pct(n_died, n_died_pct))
 
 # IMD
 table1_rows$imd <- tibble(Variable = "IMD available (study period)",
-                           Value = as.character(n_imd_study_period),
-                           Pct = as.character(round(100 * n_imd_study_period / n3_subjects, 1)))
+                           Value = suppress_count(n_imd_study_period),
+                           Pct = suppress_pct(n_imd_study_period, round(100 * n_imd_study_period / n3_subjects, 1)))
 
 # Rural/Urban (with breakdown)
 table1_rows$rural_urban <- bind_rows(
   tibble(Variable = "Rural/Urban classified (via LSOA)",
-         Value = as.character(n_rural_urban),
-         Pct = as.character(round(100 * n_rural_urban / n3_subjects, 1))),
+         Value = suppress_count(n_rural_urban),
+         Pct = suppress_pct(n_rural_urban, round(100 * n_rural_urban / n3_subjects, 1))),
   ru_distribution |>
-    transmute(Variable = glue("  {rural_urban_flag}"), Value = as.character(n), Pct = as.character(pct))
+    transmute(Variable = glue("  {rural_urban_flag}"), Value = suppress_count(n), Pct = suppress_pct(n, pct))
 )
 
 # BMI
 table1_rows$bmi <- tibble(Variable = "BMI available",
-                           Value = as.character(bmi_persons),
-                           Pct = as.character(round(100 * bmi_persons / n3_subjects, 1)))
+                           Value = suppress_count(bmi_persons),
+                           Pct = suppress_pct(bmi_persons, round(100 * bmi_persons / n3_subjects, 1)))
 
 # CKD diagnosis
 ckd_flag_col <- names(table1_local)[str_detect(names(table1_local), "ckd_dx")]
 n_ckd_dx <- if (length(ckd_flag_col) > 0) sum(table1_local[[ckd_flag_col[1]]] > 0, na.rm = TRUE) else 0L
 table1_rows$ckd_dx <- tibble(Variable = "CKD diagnosis code (any prior)",
-                              Value = as.character(n_ckd_dx),
-                              Pct = as.character(round(100 * n_ckd_dx / n3_subjects, 1)))
+                              Value = suppress_count(n_ckd_dx),
+                              Pct = suppress_pct(n_ckd_dx, round(100 * n_ckd_dx / n3_subjects, 1)))
 
 # eGFR value
 egfr_val_stats <- egfr_below_threshold |>
@@ -965,13 +993,17 @@ table1_rows$egfr_val <- tibble(Variable = "Index eGFR, median (IQR)",
 
 # eGFR < 30 subset
 table1_rows$egfr30 <- tibble(Variable = "  eGFR < 30",
-                              Value = as.character(n5_subjects),
-                              Pct = as.character(round(100 * n5_subjects / n3_subjects, 1)))
+                              Value = suppress_count(n5_subjects),
+                              Pct = suppress_pct(n5_subjects, round(100 * n5_subjects / n3_subjects, 1)))
 
 # Creatinine
-table1_rows$creat <- tibble(
-  Variable = glue("Creatinine available (5yr pre-fracture)"),
-  Value = as.character(n4_subjects), Pct = as.character(n4_pct)
+table1_rows$creat_1 <- tibble(
+  Variable = glue("Creatinine >=1 ({lookback_creatinine_days/365}yr pre-fracture)"),
+  Value = suppress_count(n4a_subjects), Pct = suppress_pct(n4a_subjects, n4a_pct)
+)
+table1_rows$creat_5 <- tibble(
+  Variable = glue("Creatinine >=5 ({lookback_creatinine_days/365}yr pre-fracture)"),
+  Value = suppress_count(n4b_subjects), Pct = suppress_pct(n4b_subjects, n4b_pct)
 )
 table1_rows$creat_count <- tibble(
   Variable = "  Median creatinine count (IQR)",
@@ -990,7 +1022,7 @@ comorbidity_table1 <- purrr::map_dfr(comorbidity_flag_cols, function(col) {
   n_pos <- sum(table1_local[[col]] > 0, na.rm = TRUE)
   pct_pos <- round(100 * n_pos / n3_subjects, 1)
   clean_name <- str_replace_all(col, "_flag$", "") |> str_replace_all("_", " ") |> str_to_title()
-  tibble(Variable = glue("  {clean_name}"), Value = as.character(n_pos), Pct = as.character(pct_pos))
+  tibble(Variable = glue("  {clean_name}"), Value = suppress_count(n_pos), Pct = suppress_pct(n_pos, pct_pos))
 })
 
 # Combine all
@@ -1009,29 +1041,30 @@ table1_full <- bind_rows(
   table1_rows$egfr_val,
   table1_rows$egfr30,
   table1_rows$ckd_dx,
-  table1_rows$creat,
+  table1_rows$creat_1,
+  table1_rows$creat_5,
   table1_rows$creat_count,
   table1_rows$creat_val,
   tibble(Variable = "--- eGFR Timeliness ---", Value = "", Pct = ""),
-  egfr_timing_table |> transmute(Variable = glue("  {timing_cat}"), Value = as.character(n), Pct = as.character(pct)),
+  egfr_timing_table |> transmute(Variable = glue("  {timing_cat}"), Value = suppress_count(n), Pct = suppress_pct(n, pct)),
   tibble(Variable = "--- Comorbidities (prior to fracture) ---", Value = "", Pct = ""),
   comorbidity_table1,
   tibble(Variable = "--- Lab-based Comorbidities (measurement threshold) ---", Value = "", Pct = ""),
   tibble(Variable = "  Hypercalcaemia (lab: Ca > 2.6 mmol/L)",
-         Value = as.character(hypercalcaemia_lab$n),
-         Pct = as.character(hypercalcaemia_lab$pct)),
+         Value = suppress_count(hypercalcaemia_lab$n),
+         Pct = suppress_pct(hypercalcaemia_lab$n, hypercalcaemia_lab$pct)),
   tibble(Variable = "  Hypocalcaemia (lab: Ca < 2.2 mmol/L)",
-         Value = as.character(hypocalcaemia_lab$n),
-         Pct = as.character(hypocalcaemia_lab$pct)),
+         Value = suppress_count(hypocalcaemia_lab$n),
+         Pct = suppress_pct(hypocalcaemia_lab$n, hypocalcaemia_lab$pct)),
   tibble(Variable = "    Patients with any Ca measurement (pre-fracture)",
-         Value = as.character(hypercalcaemia_lab$n_with_ca),
-         Pct = as.character(round(100 * hypercalcaemia_lab$n_with_ca / n3_subjects, 1))),
+         Value = suppress_count(hypercalcaemia_lab$n_with_ca),
+         Pct = suppress_pct(hypercalcaemia_lab$n_with_ca, round(100 * hypercalcaemia_lab$n_with_ca / n3_subjects, 1))),
   tibble(Variable = "--- Frailty Score (latest prior to fracture) ---", Value = "", Pct = ""),
-  tibble(Variable = "  Frailty score available",
-         Value = as.character(n_frailty_available),
-         Pct = as.character(round(100 * n_frailty_available / n3_subjects, 1))),
+  tibble(Variable = "  Frailty score available (Rockwood CFS: 1=Very Fit, 9=Terminally Ill)",
+         Value = suppress_count(n_frailty_available),
+         Pct = suppress_pct(n_frailty_available, round(100 * n_frailty_available / n3_subjects, 1))),
   frailty_score_dist |>
-    transmute(Variable = glue("    Score {value_as_number}"), Value = as.character(n), Pct = as.character(pct))
+    transmute(Variable = glue("    Score {value_as_number}"), Value = n_display, Pct = pct_display)
 )
 
 message("\n--- TABLE 1 ---")
@@ -1100,7 +1133,8 @@ report_lines <- c(
   "",
   # --- Section 3: Creatinine ---
   "<h2>3. Creatinine Characterisation</h2>",
-  glue("<p>Patients with &ge;1 creatinine in {lookback_creatinine_days/365}yr pre-fracture: <span class='key-stat'>{n4_subjects} ({n4_pct}%)</span></p>"),
+  glue("<p>Patients with &ge;1 creatinine in {lookback_creatinine_days/365}yr pre-fracture: <span class='key-stat'>{n4a_subjects} ({n4a_pct}%)</span></p>"),
+  glue("<p>Patients with &ge;5 creatinine in {lookback_creatinine_days/365}yr pre-fracture: <span class='key-stat'>{n4b_subjects} ({n4b_pct}%)</span></p>"),
   glue("<p>Median creatinine count per patient: <strong>{creat_summary$median_count}</strong> (IQR: {creat_summary$iqr_count})</p>"),
   glue("<p>Median creatinine value: <strong>{creat_summary$median_value}</strong> (IQR: {creat_summary$iqr_value})</p>"),
   "",
@@ -1140,12 +1174,14 @@ report_lines <- c(
   "",
   # --- Section 7: Frailty Score ---
   "<h2>7. Frailty Score</h2>",
+  "<p><em>Rockwood Clinical Frailty Scale: 1 = Very Fit, 2 = Well, 3 = Managing Well, 4 = Vulnerable, 5 = Mildly Frail, 6 = Moderately Frail, 7 = Severely Frail, 8 = Very Severely Frail, 9 = Terminally Ill. Lower score = less frail.</em></p>",
   glue("<p>Frailty score available for <span class='key-stat'>{n_frailty_available}</span> of {n3_subjects} patients ({round(100*n_frailty_available/n3_subjects,1)}%).</p>"),
   glue("<p>Concept IDs used: {paste(frailty_codes_vec, collapse=', ')} (includes LTHT-specific {frailty_known})</p>"),
   "<h3>Latest Frailty Score Distribution (prior to fracture)</h3>",
+  glue("<p><em>Counts &lt;{suppression_threshold} suppressed for disclosure control.</em></p>"),
   "<table><tr><th>Score</th><th>N</th><th>%</th></tr>",
-  purrr::pmap_chr(frailty_score_dist, function(value_as_number, n, pct) {
-    glue("<tr><td>{value_as_number}</td><td>{n}</td><td>{pct}%</td></tr>")
+  purrr::pmap_chr(frailty_score_dist, function(value_as_number, n, pct, n_display, pct_display) {
+    glue("<tr><td>{value_as_number}</td><td>{n_display}</td><td>{pct_display}</td></tr>")
   }),
   "</table>",
   "",

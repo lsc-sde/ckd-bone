@@ -1,6 +1,5 @@
 # Cline rules for CKD-Bone project
 
-# Ignore large output directories to keep context clean
-Results/
+# Ignore large directories to keep context clean
 .Rproj.user/
 renv/library/
