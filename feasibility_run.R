@@ -51,7 +51,7 @@ library(purrr)
 
 # --- Study parameters --------------------------------------------------------
 study_start            <- as.Date("2022-01-01")
-study_end              <- as.Date("2023-12-31")
+study_end              <- as.Date("2024-12-31")
 min_age                <- 50
 egfr_threshold         <- 44        # eGFR cut-off for analysis cohort
 egfr_window_days       <- 28        # ±4 weeks around fracture date
@@ -329,6 +329,17 @@ if (generate_codelists) {
     tibble(codelist = "frailty_score",   concept_id = frailty_codes),
     purrr::imap_dfr(as.list(comorbidity_codes), ~ tibble(codelist = .y, concept_id = .x))
   )
+
+  # Look up concept names from the CDM concept table
+  concept_names <- cdm$concept |>
+    filter(concept_id %in% !!unique(codelist_export$concept_id)) |>
+    select(concept_id, concept_name) |>
+    collect() |> patch_int64()
+
+  codelist_export <- codelist_export |>
+    left_join(concept_names, by = "concept_id") |>
+    select(codelist, concept_id, concept_name)
+
   write.csv(codelist_export, file.path(out, "all_codelists_for_partners.csv"), row.names = FALSE)
   message(glue("Codelists exported: {nrow(codelist_export)} rows, {n_distinct(codelist_export$codelist)} lists"))
 
